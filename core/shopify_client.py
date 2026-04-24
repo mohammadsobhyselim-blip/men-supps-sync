@@ -313,68 +313,122 @@ def create_product_from_supplier(normalized: dict, supplier_value: str, location
     """
     Create a new published product in Shopify from a normalized supplier product.
 
-    `normalized` must have: sku, title, description, price, stock, images, brand, barcode
-    `supplier_value` is written to custom.supplier metafield (e.g. "MF")
+    For simple products: normalized must have sku, price, stock.
+    For variable products: normalized must have variants list (each with sku, price, stock, attributes).
+    Categories in normalized["categories"] are mapped to Shopify collections.
+    Brand in normalized["brand"] becomes the Shopify vendor.
     """
-    sku    = normalized["sku"]
-    title  = normalized["title"]
+    title        = normalized["title"]
+    product_type = normalized.get("type", "simple")
+    wc_variants  = normalized.get("variants") or []
 
-    payload = {
-        "product": {
-            "title":       title,
-            "body_html":   normalized.get("description", ""),
-            "vendor":      normalized.get("brand") or "",
-            "status":      "active",             # published immediately
-            "published":   True,
-            "variants": [{
-                "sku":                   sku,
-                "price":                 str(round(float(normalized["price"]), 2)),
-                "inventory_management":  "shopify",
-                "inventory_policy":      "deny",
-                "barcode":               normalized.get("barcode") or "",
-                "weight":                normalized.get("weight") or 0,
-                "weight_unit":           "g",
-            }],
-            "images": [{"src": url} for url in normalized.get("images", []) if url],
-            "tags":   ",".join(normalized.get("tags", []) or []),
-            "metafields": [{
-                "namespace": settings.SUPPLIER_METAFIELD_NAMESPACE,
-                "key":       settings.SUPPLIER_METAFIELD_KEY,
-                "type":      "single_line_text_field",
-                "value":     supplier_value,
-            }],
-        }
+    metafield_entry = {
+        "namespace": settings.SUPPLIER_METAFIELD_NAMESPACE,
+        "key":       settings.SUPPLIER_METAFIELD_KEY,
+        "type":      "single_line_text_field",
+        "value":     supplier_value,
     }
+
+    if product_type == "variable" and wc_variants:
+        # Collect unique option names across all variations (max 3 in Shopify)
+        option_names = []
+        for var in wc_variants:
+            for attr_name in var.get("attributes", {}).keys():
+                if attr_name not in option_names:
+                    option_names.append(attr_name)
+        if not option_names:
+            option_names = ["Variant"]
+
+        shopify_variants = []
+        for var in wc_variants:
+            sv = {
+                "sku":                  var["sku"],
+                "price":                str(round(float(var["price"]), 2)),
+                "inventory_management": "shopify",
+                "inventory_policy":     "deny",
+                "weight":               normalized.get("weight") or 0,
+                "weight_unit":          "g",
+            }
+            attrs = var.get("attributes", {})
+            for i, opt_name in enumerate(option_names[:3]):
+                sv[f"option{i + 1}"] = attrs.get(opt_name, "Default")
+            shopify_variants.append(sv)
+
+        payload = {
+            "product": {
+                "title":      title,
+                "body_html":  normalized.get("description", ""),
+                "vendor":     normalized.get("brand") or "",
+                "status":     "active",
+                "published":  True,
+                "options":    [{"name": n} for n in option_names[:3]],
+                "variants":   shopify_variants,
+                "images":     [{"src": u} for u in normalized.get("images", []) if u],
+                "tags":       ",".join(normalized.get("tags", []) or []),
+                "metafields": [metafield_entry],
+            }
+        }
+    else:
+        sku = normalized["sku"]
+        payload = {
+            "product": {
+                "title":      title,
+                "body_html":  normalized.get("description", ""),
+                "vendor":     normalized.get("brand") or "",
+                "status":     "active",
+                "published":  True,
+                "variants": [{
+                    "sku":                  sku,
+                    "price":                str(round(float(normalized["price"]), 2)),
+                    "inventory_management": "shopify",
+                    "inventory_policy":     "deny",
+                    "barcode":              normalized.get("barcode") or "",
+                    "weight":               normalized.get("weight") or 0,
+                    "weight_unit":          "g",
+                }],
+                "images":     [{"src": u} for u in normalized.get("images", []) if u],
+                "tags":       ",".join(normalized.get("tags", []) or []),
+                "metafields": [metafield_entry],
+            }
+        }
 
     try:
         result = _post("/products.json", payload)
         product = result["product"]
-        logger.info(f"  ✓ Created product '{title}' (SKU={sku}) — id={product['id']}")
+        logger.info(f"  ✓ Created '{title}' (type={product_type}) — id={product['id']}, variants={len(product['variants'])}")
 
-        # Set inventory on the new variant
-        variant = product["variants"][0]
-        inv_item_id = variant["inventory_item_id"]
-        stock = int(normalized.get("stock", 0))
+        # Set inventory for every variant
+        for i, shopify_var in enumerate(product["variants"]):
+            if product_type == "variable" and i < len(wc_variants):
+                stock = int(wc_variants[i].get("stock", 0))
+            else:
+                stock = int(normalized.get("stock", 0))
 
-        inv_payload = {
-            "location_id":       location_id,
-            "inventory_item_id": inv_item_id,
-            "available":         stock,
-        }
-        r = requests.post(
-            f"{BASE}/inventory_levels/set.json",
-            headers=_headers(),
-            json=inv_payload,
-            timeout=30,
-        )
-        r.raise_for_status()
-        logger.info(f"  ✓ Set stock for {sku} → {stock}")
+            r = requests.post(
+                f"{BASE}/inventory_levels/set.json",
+                headers=_headers(),
+                json={
+                    "location_id":       location_id,
+                    "inventory_item_id": shopify_var["inventory_item_id"],
+                    "available":         stock,
+                },
+                timeout=30,
+            )
+            r.raise_for_status()
+
+        # Assign to Shopify collections based on WooCommerce categories
+        for cat_name in normalized.get("categories", []):
+            try:
+                col_id = get_or_create_custom_collection(cat_name)
+                add_product_to_collection(col_id, product["id"])
+            except Exception as e:
+                logger.warning(f"  Could not assign collection '{cat_name}': {e}")
 
         return product
 
     except requests.HTTPError as e:
-        logger.error(f"  ✗ Failed to create '{title}' (SKU={sku}): {e.response.text if e.response else e}")
+        logger.error(f"  ✗ Failed to create '{title}': {e.response.text if e.response else e}")
         return None
     except Exception as e:
-        logger.error(f"  ✗ Failed to create '{title}' (SKU={sku}): {e}")
+        logger.error(f"  ✗ Failed to create '{title}': {e}")
         return None

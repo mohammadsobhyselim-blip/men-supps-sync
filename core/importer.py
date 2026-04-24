@@ -17,16 +17,15 @@ def import_new_mfsupps_products(dry_run: bool = False,
     """
     1. List all MFsupps products.
     2. Compare against SKUs already in Shopify.
-    3. Create whatever is missing — published, with price/stock/images/desc/metafield.
+    3. Create whatever is missing — published, with price/stock/images/desc/metafield/collection.
 
-    existing_skus and location_id can be passed in from sync_engine to avoid
-    redundant API calls. If omitted, they are fetched here (standalone mode).
+    Variable products: fetch all variations and create one Shopify product with multiple variants.
+    existing_skus and location_id can be passed in from sync_engine to avoid redundant API calls.
     """
     logger.info("─" * 60)
     logger.info(f"Discovering new MFsupps products {'(DRY RUN)' if dry_run else ''}...")
     logger.info("─" * 60)
 
-    # 1. Get location for inventory (if not provided)
     if location_id is None:
         try:
             location_id = shopify.get_primary_location_id()
@@ -34,11 +33,9 @@ def import_new_mfsupps_products(dry_run: bool = False,
             logger.error(f"Cannot get Shopify location: {e}")
             return {"error": str(e)}
 
-    # 2. Get existing SKUs from Shopify (if not provided)
     if existing_skus is None:
         existing_skus = shopify.get_all_skus()
 
-    # 3. Get all MFsupps products
     mf_products = mfsupps.get_all_products()
     if not mf_products:
         logger.warning("No products returned from MFsupps — check API.")
@@ -47,35 +44,67 @@ def import_new_mfsupps_products(dry_run: bool = False,
     stats = {"new": 0, "created": 0, "skipped": 0, "errors": 0}
 
     for raw in mf_products:
+        product_type = raw.get("type", "simple")
         normalized = mfsupps.normalize_product(raw)
-        sku = normalized["sku"]
 
-        if not sku:
-            logger.debug(f"  Skipping MF product with no SKU: {normalized.get('title')}")
-            stats["skipped"] += 1
-            continue
+        if product_type == "variable":
+            wc_id = raw.get("id")
+            variations = mfsupps.get_variations(wc_id)
+            var_skus = [v["sku"] for v in [mfsupps.normalize_variation(v) for v in variations] if v["sku"]]
 
-        # Already in Shopify? Then sync engine handles it. Skip here.
-        if sku in existing_skus:
-            continue
+            if not var_skus:
+                logger.debug(f"  Skipping variable product with no variation SKUs: {normalized['title']}")
+                stats["skipped"] += 1
+                continue
 
-        stats["new"] += 1
-        logger.info(f"  NEW: {normalized['title']} (SKU={sku}) — price={normalized['price']}, stock={normalized['stock']}")
+            # Skip if any variation SKU is already in Shopify
+            if any(s in existing_skus for s in var_skus):
+                continue
 
-        if dry_run:
-            continue
+            normalized["variants"] = [mfsupps.normalize_variation(v) for v in variations]
+            stats["new"] += 1
+            logger.info(f"  NEW (variable): {normalized['title']} — {len(var_skus)} variants")
 
-        # Create it
-        created = shopify.create_product_from_supplier(
-            normalized=normalized,
-            supplier_value=settings.SUPPLIER_MFSUPPS,
-            location_id=location_id,
-        )
-        if created:
-            stats["created"] += 1
-            existing_skus.add(sku)  # Prevent double-create if SKU repeats
+            if dry_run:
+                continue
+
+            created = shopify.create_product_from_supplier(
+                normalized=normalized,
+                supplier_value=settings.SUPPLIER_MFSUPPS,
+                location_id=location_id,
+            )
+            if created:
+                stats["created"] += 1
+                existing_skus.update(var_skus)
+            else:
+                stats["errors"] += 1
+
         else:
-            stats["errors"] += 1
+            sku = normalized["sku"]
+            if not sku:
+                logger.debug(f"  Skipping product with no SKU: {normalized.get('title')}")
+                stats["skipped"] += 1
+                continue
+
+            if sku in existing_skus:
+                continue
+
+            stats["new"] += 1
+            logger.info(f"  NEW: {normalized['title']} (SKU={sku}) — price={normalized['price']}, stock={normalized['stock']}")
+
+            if dry_run:
+                continue
+
+            created = shopify.create_product_from_supplier(
+                normalized=normalized,
+                supplier_value=settings.SUPPLIER_MFSUPPS,
+                location_id=location_id,
+            )
+            if created:
+                stats["created"] += 1
+                existing_skus.add(sku)
+            else:
+                stats["errors"] += 1
 
     logger.info("─" * 60)
     logger.info(f"Import done {'(DRY RUN) ' if dry_run else ''}| "

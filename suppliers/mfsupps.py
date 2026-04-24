@@ -118,17 +118,58 @@ def get_all_products() -> list[dict]:
     return all_products
 
 
-def normalize_product(raw: dict) -> dict:
-    """Convert a WooCommerce product dict into the shape expected by Shopify importer."""
-    price = raw.get("price") or raw.get("regular_price") or "0"
-    stock_qty = raw.get("stock_quantity")
-    in_stock = raw.get("stock_status", "instock") == "instock"
+def get_variations(product_id: int) -> list[dict]:
+    """Fetch all variations for a variable WooCommerce product."""
+    all_vars = []
+    page = 1
+    while True:
+        try:
+            r = SESSION.get(
+                f"{settings.MFSUPPS_API_URL}/wp-json/wc/v3/products/{product_id}/variations",
+                params={"page": page, "per_page": 100},
+                timeout=15,
+            )
+            r.raise_for_status()
+            batch = r.json()
+            if not batch:
+                break
+            all_vars.extend(batch)
+            if len(batch) < 100:
+                break
+            page += 1
+        except requests.RequestException as e:
+            logger.error(f"[MFsupps] Failed to fetch variations for product {product_id}: {e}")
+            break
+    return all_vars
+
+
+def normalize_variation(var: dict) -> dict:
+    """Convert a WooCommerce variation into normalized form for a Shopify variant."""
+    price = var.get("price") or var.get("regular_price") or "0"
+    stock_qty = var.get("stock_quantity")
+    in_stock = var.get("stock_status", "instock") == "instock"
     if stock_qty is None:
         stock_qty = 100 if in_stock else 0
+    attrs = {
+        a["name"]: a["option"]
+        for a in var.get("attributes", [])
+        if a.get("name") and a.get("option")
+    }
+    return {
+        "sku":        str(var.get("sku", "")).strip(),
+        "price":      float(price),
+        "stock":      int(stock_qty),
+        "attributes": attrs,
+    }
+
+
+def normalize_product(raw: dict) -> dict:
+    """Convert a WooCommerce product dict into the shape expected by Shopify importer."""
+    product_type = raw.get("type", "simple")
 
     images = [img["src"] for img in raw.get("images", []) if img.get("src")]
-
     tags = [t["name"] for t in raw.get("tags", []) if t.get("name")]
+    categories = [c["name"] for c in raw.get("categories", []) if c.get("name")]
 
     weight = raw.get("weight")
     try:
@@ -136,17 +177,32 @@ def normalize_product(raw: dict) -> dict:
     except (ValueError, TypeError):
         weight = 0
 
+    if product_type == "variable":
+        price, stock_qty = 0.0, 0
+    else:
+        price = raw.get("price") or raw.get("regular_price") or "0"
+        stock_qty = raw.get("stock_quantity")
+        in_stock = raw.get("stock_status", "instock") == "instock"
+        if stock_qty is None:
+            stock_qty = 100 if in_stock else 0
+        price = float(price)
+        stock_qty = int(stock_qty)
+
     return {
         "sku":         str(raw.get("sku", "")).strip(),
         "title":       raw.get("name", "Untitled"),
         "description": raw.get("description", ""),
-        "price":       float(price),
-        "stock":       int(stock_qty),
+        "price":       price,
+        "stock":       stock_qty,
         "images":      images,
         "brand":       _get_brand(raw),
         "weight":      weight,
         "tags":        tags,
         "barcode":     "",
+        "type":        product_type,
+        "wc_id":       raw.get("id"),
+        "categories":  categories,
+        "variants":    [],  # filled by importer for variable products
     }
 
 

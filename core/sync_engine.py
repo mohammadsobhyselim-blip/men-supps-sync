@@ -98,7 +98,9 @@ def run_sync(dry_run=False, skip_import=False):
 
         # Process each variant
         for variant in product.get("variants", []):
-            sku = variant.get("sku", "").strip()
+            if not variant:
+                continue
+            sku = (variant.get("sku") or "").strip()
             variant_id = variant["id"]
             stats["checked"] += 1
 

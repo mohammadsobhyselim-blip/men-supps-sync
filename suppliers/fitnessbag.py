@@ -212,24 +212,36 @@ def get_products_by_category(category_id: int) -> list[dict]:
     return all_products
 
 
+def normalize_variation(var: dict) -> dict:
+    """Convert a WooCommerce variation into normalized form for a Shopify variant."""
+    price = var.get("price") or var.get("regular_price") or "0"
+    stock_qty = var.get("stock_quantity")
+    in_stock = var.get("stock_status", "instock") == "instock"
+    if stock_qty is None:
+        stock_qty = 100 if in_stock else 0
+    attrs = {
+        a["name"]: a["option"]
+        for a in var.get("attributes", [])
+        if a.get("name") and a.get("option")
+    }
+    return {
+        "sku":        str(var.get("sku", "")).strip(),
+        "price":      float(price),
+        "stock":      int(stock_qty),
+        "attributes": attrs,
+    }
+
+
 def normalize_product(raw: dict) -> dict:
     """
     Convert a WooCommerce product dict into the normalized shape
     expected by shopify_client.create_product_from_supplier().
-    For variable products, uses the first variation's price/stock.
     """
     product_type = raw.get("type", "simple")
-    sku = str(raw.get("sku", "")).strip()
 
-    price = raw.get("price") or raw.get("regular_price") or "0"
-    stock_qty = raw.get("stock_quantity")
-    in_stock = raw.get("stock_status", "instock") == "instock"
-    if stock_qty is None:
-        stock_qty = 100 if in_stock else 0
-
-    # For variable products with no top-level SKU, we'll import per-variation below
     images = [img["src"] for img in raw.get("images", []) if img.get("src")]
-    tags   = [t["name"] for t in raw.get("tags", []) if t.get("name")]
+    tags = [t["name"] for t in raw.get("tags", []) if t.get("name")]
+    categories = [c["name"] for c in raw.get("categories", []) if c.get("name")]
 
     weight = raw.get("weight")
     try:
@@ -237,12 +249,23 @@ def normalize_product(raw: dict) -> dict:
     except (ValueError, TypeError):
         weight = 0
 
+    if product_type == "variable":
+        price, stock_qty = 0.0, 0
+    else:
+        price = raw.get("price") or raw.get("regular_price") or "0"
+        stock_qty = raw.get("stock_quantity")
+        in_stock = raw.get("stock_status", "instock") == "instock"
+        if stock_qty is None:
+            stock_qty = 100 if in_stock else 0
+        price = float(price)
+        stock_qty = int(stock_qty)
+
     return {
-        "sku":         sku,
+        "sku":         str(raw.get("sku", "")).strip(),
         "title":       raw.get("name", "Untitled"),
         "description": raw.get("description", ""),
-        "price":       float(price),
-        "stock":       int(stock_qty),
+        "price":       price,
+        "stock":       stock_qty,
         "images":      images,
         "brand":       _get_brand(raw),
         "weight":      weight,
@@ -250,6 +273,8 @@ def normalize_product(raw: dict) -> dict:
         "barcode":     "",
         "type":        product_type,
         "wc_id":       raw.get("id"),
+        "categories":  categories,
+        "variants":    [],  # filled by importer for variable products
     }
 
 
