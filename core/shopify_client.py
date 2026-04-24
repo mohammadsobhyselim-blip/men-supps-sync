@@ -79,7 +79,7 @@ def get_all_products_paginated():
         if 'rel="next"' in link_header:
             for part in link_header.split(","):
                 if 'rel="next"' in part:
-                    page_info = part.split("page_info=")[1].split("&")[0].rstrip(">").strip()
+                    page_info = part.split("page_info=")[1].split(">")[0].strip()
                     url = f"{BASE}/products.json"
                     params = {"limit": 250, "fields": "id,title,tags,variants,status", "page_info": page_info}
                     break
@@ -261,7 +261,7 @@ def bulk_set_supplier_on_last_n(n: int, supplier_value: str, dry_run: bool = Fal
         if 'rel="next"' in link_header:
             for part in link_header.split(","):
                 if 'rel="next"' in part:
-                    page_info = part.split("page_info=")[1].split("&")[0].rstrip(">").strip()
+                    page_info = part.split("page_info=")[1].split(">")[0].strip()
                     url = f"{BASE}/products.json"
                     params = {"limit": 250, "fields": "id,title", "page_info": page_info}
                     break
