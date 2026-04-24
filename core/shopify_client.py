@@ -90,9 +90,14 @@ def get_all_products_paginated():
 def get_product_metafield_supplier(product_id):
     """
     Read the custom.supplier metafield for a given product.
-    Returns the supplier string or None.
+    Returns the supplier string or None (including when product has no metafields).
     """
-    data = _get(f"/products/{product_id}/metafields.json")
+    try:
+        data = _get(f"/products/{product_id}/metafields.json")
+    except requests.HTTPError as e:
+        if e.response is not None and e.response.status_code == 404:
+            return None
+        raise
     for mf in data.get("metafields", []):
         if mf["namespace"] == settings.SUPPLIER_METAFIELD_NAMESPACE and \
            mf["key"] == settings.SUPPLIER_METAFIELD_KEY:
