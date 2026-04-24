@@ -1,0 +1,5 @@
+requests==2.31.0
+python-dotenv==1.0.0
+APScheduler==3.10.4
+colorlog==6.8.0
+Flask==3.0.3
