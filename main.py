@@ -73,7 +73,6 @@ def main():
         tag = " (DRY RUN)" if dry_run else ""
         if tag_fitnessbag:
             from core import shopify_client as shopify
-            from config import settings
             logger.info(f"Backfilling supplier=MFB metafield on last 270 products{tag}")
             stats = shopify.bulk_set_supplier_on_last_n(
                 n=270,
